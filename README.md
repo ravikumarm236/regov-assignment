@@ -1,4 +1,4 @@
-# Serverless application developmenet accounts uploads processing
+# Serverless application developmenet accounts - uploads processing
 
 template show's the fallowing steps
 
