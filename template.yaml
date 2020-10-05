@@ -1,10 +1,195 @@
-MySNSTopic:
-  Type: AWS::SNS::Topic
-  Properties:
-    Subscription:
-      - Endpoint:
-          Fn::GetAtt:
-            - "accountQueue"
-            - "Arn"
-        Protocol: "sqs"
-    TopicName: "accountTopic"
+AWSTemplateFormatVersion: 2020-10-05
+Description: "SNStoSQS"
+Parameters:
+  account_number:
+    Type: String
+    AllowedPattern: '[0-9]'
+    MinLength: '1'
+    MaxLength: '20'
+    ConstraintDescription: must contain only numerics
+  currency_code:
+    Type: String
+    AllowedPattern: '[A-Z]'
+    MinLength: '1'
+    MaxLength: '3'
+    ConstraintDescription: must be either Alphanumeric
+  ReadCapacityUnits:
+    Description: Provisioned read throughput
+    Type: Number
+    Default: '5'
+    MinValue: '5'
+    MaxValue: '10000'
+    ConstraintDescription: must be between 5 and 10000
+  WriteCapacityUnits:
+    Description: Provisioned write throughput
+    Type: Number
+    Default: '10'
+    MinValue: '5'
+    MaxValue: '10000'
+    ConstraintDescription: must be between 5 and 10000
+
+Resources:
+  AccountCreationTopic:
+    Type: 'AWS::SNS::Topic'
+    Properties:
+      Subscription:
+        - Endpoint: !GetAtt 
+            - AccountCreationQueue
+            - Arn
+          Protocol: sqs
+  AccountCreationQueue:
+    Type: 'AWS::SQS::Queue'
+  AccountCreationQueuePolicy:
+    Type: 'AWS::SQS::QueuePolicy'
+    Properties:
+      PolicyDocument:
+        Id: AccountCreationQueue
+        Statement:
+          - Sid: Allow-SendMessage-To-Queue-From-SNS-Topic
+            Effect: Allow
+            Principal:
+              AWS: '*'
+            Action:
+              - 'sqs:SendMessage'
+            Resource: '*'
+            Condition:
+              ArnEquals:
+                'aws:SourceArn': !Ref AccountCreationTopic
+      Queues:
+        - !Ref AccountCreationQueue
+
+  account_info:
+    Type: 'AWS::DynamoDB::Table'
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: !Ref account_number
+          AttributeType: !Ref currency_code
+      KeySchema:
+        - AttributeName: !Ref account_number
+          KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: !Ref ReadCapacityUnits
+        WriteCapacityUnits: !Ref WriteCapacityUnits
+  
+  account_upload:
+    Type: AWS::S3::Bucket
+    Properties:
+      AccessControl: Private
+      NotificationConfiguration:
+        TopicConfigurations:
+        - Topic: !GetAtt 
+            - AccountCreationTopic
+            - Arn
+  ConsumerLambdaRole: 
+    Type: AWS::IAM::Role
+    Properties: 
+      AssumeRolePolicyDocument: 
+        Version: '2012-10-17'
+        Statement: 
+        - Effect: Allow
+          Principal: 
+            Service: lambda.amazonaws.com
+          Action: 
+          - sts:AssumeRole
+      Path: '/'
+      Policies: 
+      - PolicyName: logs
+        PolicyDocument: 
+          Statement: 
+          - Effect: Allow
+            Action: 
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource: arn:aws:logs:*:*:*
+      - PolicyName: sqs
+        PolicyDocument: 
+          Statement: 
+          - Effect: Allow
+            Action: 
+            - sqs:ReceiveMessage
+            Resource: !Sub ${AccountCreationQueue.Arn}
+      - PolicyName: lambda
+        PolicyDocument: 
+          Statement: 
+          - Effect: Allow
+            Action: 
+            - lambda:InvokeFunction
+            Resource: !Sub ${WorkerLambda.Arn}
+  ConsumerLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./consumer 
+      Handler: index.handler
+      MemorySize: 128
+      Role: !Sub ${ConsumerLambdaRole.Arn}
+      Runtime: nodejs6.10
+      Timeout: 60
+      Environment:
+        Variables:
+          TASK_QUEUE_URL: !Ref AccountCreationQueue
+          WORKER_LAMBDA_NAME: !Ref WorkerLambda
+      Events:
+        Timer:
+          Type: Schedule
+          Properties:
+            Schedule: rate(1 minute)
+  WorkerLambdaRole: 
+    Type: AWS::IAM::Role
+    Properties: 
+      AssumeRolePolicyDocument: 
+        Version: '2012-10-17'
+        Statement: 
+        - Effect: Allow
+          Principal: 
+            Service: lambda.amazonaws.com
+          Action: 
+          - sts:AssumeRole
+      Path: '/'
+      Policies: 
+      - PolicyName: logs
+        PolicyDocument: 
+          Statement: 
+          - Effect: Allow
+            Action: 
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource: arn:aws:logs:*:*:*
+      - PolicyName: sqs
+        PolicyDocument: 
+          Statement: 
+          - Effect: Allow
+            Action: 
+            - sqs:DeleteMessage
+            Resource: !Sub ${AccountCreationQueue.Arn}
+  WorkerLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ./worker 
+      Handler: index.handler
+      MemorySize: 128
+      Role: !Sub ${WorkerLambdaRole.Arn}
+      Runtime: nodejs6.10
+      Timeout: 60
+      Environment:
+        Variables:
+          TASK_QUEUE_URL: !Ref AccountCreationQueue
+
+Outputs:
+  AccountCreationTopicTopicARN:
+    Value: !Ref AccountCreationTopic
+    Description: Topic ARN of newly created SNS topic
+  AccountCreationQueueInfo:
+    Value: !Join 
+      - ' '
+      - - 'ARN:'
+        - !GetAtt 
+          - AccountCreationQueue
+          - Arn
+        - 'URL:'
+        - !Ref AccountCreationQueue
+  TableName:
+    Value: !Ref account_info
+    Description: Table name of the newly created DynamoDB table
+  
